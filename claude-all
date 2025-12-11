@@ -9,6 +9,7 @@ NC='\033[0m' # No Color
 
 LITELLM_PORT=8555
 LITELLM_HOST="http://127.0.0.1:$LITELLM_PORT"
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 
 check_dependencies() {
     echo -e "${BLUE}Checking dependencies...${NC}"
@@ -34,13 +35,47 @@ check_dependencies() {
     fi
 }
 
-check_gcloud() {
-    if ! command -v gcloud &> /dev/null; then
-        echo -e "${RED}Error: Google Cloud CLI (gcloud) is required for OAuth login.${NC}"
-        echo "Please install it: https://cloud.google.com/sdk/docs/install"
+check_gemini_oauth() {
+    # Check if we have ADC credentials
+    ADC_PATH="$HOME/.config/gcloud/application_default_credentials.json"
+    
+    if [ -f "$ADC_PATH" ]; then
+        return 0
+    fi
+    
+    # If not, check if gcloud is installed
+    if command -v gcloud &> /dev/null; then
+        echo -e "${BLUE}gcloud found. Attempting login...${NC}"
+        gcloud auth application-default login
+        return
+    fi
+    
+    # Fallback to custom python script
+    echo -e "${YELLOW}gcloud not found. Using lightweight Python Auth helper...${NC}"
+    
+    # Install dependency
+    if ! python3 -m pip show google-auth-oauthlib &> /dev/null; then
+         echo "Installing google-auth-oauthlib..."
+         python3 -m pip install google-auth-oauthlib
+    fi
+    
+    # Run helper script
+    # We expect gemini_auth.py to be in the same dir as this script (if cloned) or downloaded
+    AUTH_SCRIPT="$SCRIPT_DIR/gemini_auth.py"
+    if [ ! -f "$AUTH_SCRIPT" ]; then
+        # If installed via curl, download the helper
+        curl -fsSL https://raw.githubusercontent.com/zesbe/CliAllModel/main/gemini_auth.py -o "$HOME/.local/bin/gemini_auth.py"
+        AUTH_SCRIPT="$HOME/.local/bin/gemini_auth.py"
+    fi
+    
+    python3 "$AUTH_SCRIPT"
+    
+    if [ ! -f "$ADC_PATH" ]; then
+        echo -e "${RED}Authentication failed or cancelled.${NC}"
         exit 1
     fi
 }
+
 
 start_litellm_proxy() {
     local model=$1
@@ -81,22 +116,26 @@ cleanup() {
 trap cleanup EXIT
 
 # Main Menu
-clear
-echo -e "${GREEN}=====================================${NC}"
-echo -e "${GREEN}    Claude Code Multi-Model Launcher ${NC}"
-echo -e "${GREEN}=====================================${NC}"
-echo "Select your AI Provider:"
-echo "1) MiniMax (Direct Anthropic API)"
-echo "2) Google Gemini (API Key - AI Studio)"
-echo "3) Google Gemini (OAuth - Vertex AI)"
-echo "4) OpenAI (API Key)"
-echo "5) xAI / Grok (API Key)"
-echo "6) ZhipuAI / GLM (API Key)"
-echo "7) Groq (API Key)"
-echo "8) Ollama (Local Models)"
-echo "9) Custom / Other"
-echo -e "${GREEN}=====================================${NC}"
-read -p "Enter choice [1-9]: " choice
+choice=$1
+
+if [ -z "$choice" ]; then
+    clear
+    echo -e "${GREEN}=====================================${NC}"
+    echo -e "${GREEN}    Claude Code Multi-Model Launcher ${NC}"
+    echo -e "${GREEN}=====================================${NC}"
+    echo "Select your AI Provider:"
+    echo "1) MiniMax (Direct Anthropic API)"
+    echo "2) Google Gemini (API Key - AI Studio)"
+    echo "3) Google Gemini (OAuth - Vertex AI)"
+    echo "4) OpenAI (API Key)"
+    echo "5) xAI / Grok (API Key)"
+    echo "6) ZhipuAI / GLM (API Key)"
+    echo "7) Groq (API Key)"
+    echo "8) Ollama (Local Models)"
+    echo "9) Custom / Other"
+    echo -e "${GREEN}=====================================${NC}"
+    read -p "Enter choice [1-9]: " choice
+fi
 
 export ANTHROPIC_MODEL="claude-3-sonnet-20240229" # Dummy model name for CLI validation
 
@@ -134,14 +173,9 @@ case $choice in
     3)
         # Gemini Vertex OAuth
         check_dependencies
-        check_gcloud
         echo -e "${BLUE}Configuring for Gemini (Vertex AI OAuth)...${NC}"
         
-        echo "Checking gcloud authentication..."
-        if ! gcloud auth print-access-token &> /dev/null; then
-             echo "Redirecting to browser for Login..."
-             gcloud auth application-default login
-        fi
+        check_gemini_oauth
 
         if [ -z "$VERTEX_PROJECT" ]; then
             read -p "Enter Google Cloud Project ID: " VERTEX_PROJECT
