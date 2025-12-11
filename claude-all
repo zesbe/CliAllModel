@@ -1,0 +1,215 @@
+#!/bin/bash
+
+# Colors
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+LITELLM_PORT=8555
+LITELLM_HOST="http://127.0.0.1:$LITELLM_PORT"
+
+check_dependencies() {
+    echo -e "${BLUE}Checking dependencies...${NC}"
+    
+    if ! command -v npm &> /dev/null; then
+        echo -e "${RED}Error: npm is not installed.${NC}"
+        exit 1
+    fi
+
+    if ! command -v claude &> /dev/null; then
+        echo -e "${YELLOW}'claude' command not found. Installing @anthropic-ai/claude-code globally...${NC}"
+        npm install -g @anthropic-ai/claude-code
+    fi
+
+    if ! command -v python3 &> /dev/null; then
+        echo -e "${RED}Error: python3 is not installed.${NC}"
+        exit 1
+    fi
+
+    if ! python3 -m pip show litellm &> /dev/null; then
+        echo -e "${YELLOW}'litellm' not found. Installing via pip...${NC}"
+        python3 -m pip install litellm[proxy]
+    fi
+}
+
+start_litellm_proxy() {
+    local model=$1
+    echo -e "${BLUE}Starting LiteLLM proxy for model: $model...${NC}"
+    
+    # Kill any existing litellm on this port
+    fuser -k $LITELLM_PORT/tcp &> /dev/null || true
+
+    # Start litellm in background
+    # We use --drop_params to prevent sending Anthropic-specific params that might confuse other providers
+    python3 -m litellm --model "$model" --port $LITELLM_PORT --drop_params &> /tmp/litellm.log &
+    LITELLM_PID=$!
+    
+    # Wait for it to start
+    echo -n "Waiting for proxy to start..."
+    for i in {1..10}; do
+        if curl -s $LITELLM_HOST/health &> /dev/null; then
+            echo -e " ${GREEN}Ready!${NC}"
+            return 0
+        fi
+        sleep 1
+        echo -n "."
+    done
+    
+    echo -e "\n${RED}Failed to start LiteLLM proxy. Check logs:${NC}"
+    cat /tmp/litellm.log
+    kill $LITELLM_PID 2>/dev/null
+    exit 1
+}
+
+cleanup() {
+    if [ ! -z "$LITELLM_PID" ]; then
+        echo -e "\n${BLUE}Stopping LiteLLM proxy...${NC}"
+        kill $LITELLM_PID 2>/dev/null
+    fi
+}
+
+trap cleanup EXIT
+
+# Main Menu
+clear
+echo -e "${GREEN}=====================================${NC}"
+echo -e "${GREEN}    Claude Code Multi-Model Launcher ${NC}"
+echo -e "${GREEN}=====================================${NC}"
+echo "Select your AI Provider:"
+echo "1) MiniMax (Direct)"
+echo "2) Google Gemini (via LiteLLM)"
+echo "3) OpenAI (via LiteLLM)"
+echo "4) ZhipuAI / GLM (via LiteLLM)"
+echo "5) Groq (via LiteLLM)"
+echo "6) Custom (LiteLLM)"
+echo -e "${GREEN}=====================================${NC}"
+read -p "Enter choice [1-6]: " choice
+
+case $choice in
+    1)
+        # MiniMax Direct
+        echo -e "${BLUE}Configuring for MiniMax...${NC}"
+        read -p "Enter MiniMax API Key: " api_key
+        export ANTHROPIC_BASE_URL="https://api.minimax.io/anthropic"
+        export ANTHROPIC_API_KEY="$api_key"
+        # MiniMax often maps 'claude-3-opus' etc to their own, or we use their model name
+        # For compatibility with standard claude-code which asks for 'sonnet'/'opus', 
+        # we might need to rely on MiniMax's auto-mapping or force a specific one.
+        # Let's try forcing the known compatible model if the tool allows, 
+        # otherwise we let the user pick in the tool.
+        echo -e "${YELLOW}Note: In Claude CLI, select any model. MiniMax will handle the request.${NC}"
+        exec claude
+        ;;
+    2)
+        # Gemini
+        check_dependencies
+        echo -e "${BLUE}Configuring for Google Gemini...${NC}"
+        if [ -z "$GEMINI_API_KEY" ]; then
+            read -p "Enter Gemini API Key: " GEMINI_API_KEY
+            export GEMINI_API_KEY
+        fi
+        # Default to a good Flash model
+        MODEL_NAME="gemini/gemini-2.0-flash"
+        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
+        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        
+        start_litellm_proxy "$MODEL_NAME"
+        
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-any-string-is-fine-for-litellm"
+        # Force the CLI to think we are using a supported model so it doesn't complain
+        # LiteLLM will route it to Gemini regardless
+        export ANTHROPIC_MODEL="claude-3-sonnet-20240229" 
+        
+        echo -e "${GREEN}🚀 Launching Claude with Gemini...${NC}"
+        claude
+        ;;
+    3)
+        # OpenAI
+        check_dependencies
+        echo -e "${BLUE}Configuring for OpenAI...${NC}"
+        if [ -z "$OPENAI_API_KEY" ]; then
+            read -p "Enter OpenAI API Key: " OPENAI_API_KEY
+            export OPENAI_API_KEY
+        fi
+        MODEL_NAME="gpt-4o"
+        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
+        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        
+        start_litellm_proxy "$MODEL_NAME"
+        
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-any-string-is-fine-for-litellm"
+        export ANTHROPIC_MODEL="claude-3-sonnet-20240229"
+        
+        echo -e "${GREEN}🚀 Launching Claude with OpenAI...${NC}"
+        claude
+        ;;
+    4)
+        # ZhipuAI
+        check_dependencies
+        echo -e "${BLUE}Configuring for ZhipuAI (GLM)...${NC}"
+        if [ -z "$ZHIPUAI_API_KEY" ]; then
+            read -p "Enter ZhipuAI API Key: " ZHIPUAI_API_KEY
+            export ZHIPUAI_API_KEY
+        fi
+        MODEL_NAME="zhipu/glm-4"
+        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
+        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        
+        start_litellm_proxy "$MODEL_NAME"
+        
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-any-string-is-fine-for-litellm"
+        export ANTHROPIC_MODEL="claude-3-sonnet-20240229"
+        
+        echo -e "${GREEN}🚀 Launching Claude with GLM...${NC}"
+        claude
+        ;;
+    5)
+        # Groq
+        check_dependencies
+        echo -e "${BLUE}Configuring for Groq...${NC}"
+        if [ -z "$GROQ_API_KEY" ]; then
+            read -p "Enter Groq API Key: " GROQ_API_KEY
+            export GROQ_API_KEY
+        fi
+        MODEL_NAME="groq/llama3-70b-8192"
+        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
+        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        
+        start_litellm_proxy "$MODEL_NAME"
+        
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-any-string-is-fine-for-litellm"
+        export ANTHROPIC_MODEL="claude-3-sonnet-20240229"
+        
+        echo -e "${GREEN}🚀 Launching Claude with Groq...${NC}"
+        claude
+        ;;
+    6)
+        # Custom
+        check_dependencies
+        echo -e "${BLUE}Configuring Custom LiteLLM Model...${NC}"
+        echo "Format example: provider/model-name (e.g., ollama/llama3)"
+        read -p "Enter LiteLLM Model String: " MODEL_NAME
+        
+        echo "Set any required env vars (e.g., OLLAMA_API_BASE). Press Enter when done."
+        read -p "Press Enter to continue..."
+
+        start_litellm_proxy "$MODEL_NAME"
+        
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-any-string-is-fine-for-litellm"
+        export ANTHROPIC_MODEL="claude-3-sonnet-20240229"
+        
+        echo -e "${GREEN}🚀 Launching Claude with Custom Model...${NC}"
+        claude
+        ;;
+    *)
+        echo "Invalid choice"
+        exit 1
+        ;;
+esac
