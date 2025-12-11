@@ -6,16 +6,17 @@ import requests
 import hashlib
 import base64
 import secrets
+import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 import threading
 
 # Configuration
-# This Client ID is widely used/found in OpenAI's public SDKs or assumed for CLI apps.
-# If this fails, it means OpenAI has restricted it or rotated it.
-CLIENT_ID = "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh" # Common Auth0 Client ID for OpenAI
-AUTH_DOMAIN = "auth0.openai.com"
-REDIRECT_URI = "http://localhost:3000/callback"
+# Client ID found in codex source code
+CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann" 
+AUTH_DOMAIN = "auth.openai.com" 
+# Codex uses /auth/callback structure
+REDIRECT_PATH = "/auth/callback"
 SCOPE = "openid profile email offline_access"
 AUDIENCE = "https://api.openai.com/v1"
 
@@ -25,6 +26,11 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
     code = None
     
     def do_GET(self):
+        # Only handle the callback path
+        if not self.path.startswith(REDIRECT_PATH):
+            self.send_response(404)
+            return
+
         query = urlparse(self.path).query
         params = parse_qs(query)
         
@@ -33,7 +39,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(b"<html><body><h1>Login Successful!</h1><p>You can close this tab and return to the terminal.</p></body></html>")
+            self.wfile.write(b"<html><body><h1>Login Successful!</h1><p>Return to your terminal.</p></body></html>")
         else:
             self.send_response(400)
             self.wfile.write(b"Missing code parameter.")
@@ -47,23 +53,34 @@ def generate_pkce_pair():
     challenge = base64.urlsafe_b64encode(digest).decode().rstrip('=')
     return verifier, challenge
 
+def get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
 def main():
-    print("\n\033[1;35mOpenAI OAuth Helper (Experimental)\033[0m")
+    print("\n\033[1;35mOpenAI OAuth Helper (Experimental - Codex ID)\033[0m")
+    
+    # 1. Setup Local Server on Random Port (like codex does)
+    port = get_free_port()
+    redirect_uri = f"http://localhost:{port}{REDIRECT_PATH}"
     
     # PKCE
     code_verifier, code_challenge = generate_pkce_pair()
     
     # Start Listener
-    server = HTTPServer(('localhost', 3000), OAuthCallbackHandler)
+    server = HTTPServer(('localhost', port), OAuthCallbackHandler)
     server_thread = threading.Thread(target=server.handle_request)
     server_thread.start()
     
     # Construct Auth URL
+    # Note: Codex seems to use a specific issuer/domain. 
+    # We try auth.openai.com first.
     auth_url = (
         f"https://{AUTH_DOMAIN}/authorize?"
         f"response_type=code&"
         f"client_id={CLIENT_ID}&"
-        f"redirect_uri={REDIRECT_URI}&"
+        f"redirect_uri={redirect_uri}&"
         f"scope={SCOPE}&"
         f"audience={AUDIENCE}&"
         f"code_challenge={code_challenge}&"
@@ -89,7 +106,7 @@ def main():
         "client_id": CLIENT_ID,
         "code_verifier": code_verifier,
         "code": OAuthCallbackHandler.code,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
     }
     
     response = requests.post(token_url, json=payload)
@@ -104,8 +121,6 @@ def main():
             
         print(f"\n\033[1;32mSuccess! Access Token acquired.\033[0m")
         print(f"Saved to: {CREDENTIALS_PATH}")
-        print("Note: This token is a standard JWT access token, not a 'sk-' API key.")
-        print("Use it as a Bearer token in headers.")
     else:
         print(f"\n\033[1;31mError: {response.text}\033[0m")
 
