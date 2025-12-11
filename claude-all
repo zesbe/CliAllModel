@@ -60,10 +60,8 @@ check_gemini_oauth() {
     fi
     
     # Run helper script
-    # We expect gemini_auth.py to be in the same dir as this script (if cloned) or downloaded
     AUTH_SCRIPT="$SCRIPT_DIR/gemini_auth.py"
     if [ ! -f "$AUTH_SCRIPT" ]; then
-        # If installed via curl, download the helper
         curl -fsSL https://raw.githubusercontent.com/zesbe/CliAllModel/main/gemini_auth.py -o "$HOME/.local/bin/gemini_auth.py"
         AUTH_SCRIPT="$HOME/.local/bin/gemini_auth.py"
     fi
@@ -76,6 +74,33 @@ check_gemini_oauth() {
     fi
 }
 
+check_openai_oauth() {
+    CRED_PATH="$HOME/.config/openai/credentials.json"
+    
+    if [ ! -f "$CRED_PATH" ]; then
+        echo -e "${YELLOW}No cached OpenAI OAuth token found. Launching helper...${NC}"
+        
+        # Install dependency
+        python3 -m pip install requests > /dev/null 2>&1
+
+        AUTH_SCRIPT="$SCRIPT_DIR/openai_auth.py"
+        if [ ! -f "$AUTH_SCRIPT" ]; then
+            curl -fsSL https://raw.githubusercontent.com/zesbe/CliAllModel/main/openai_auth.py -o "$HOME/.local/bin/openai_auth.py"
+            AUTH_SCRIPT="$HOME/.local/bin/openai_auth.py"
+        fi
+        
+        python3 "$AUTH_SCRIPT"
+        
+        if [ ! -f "$CRED_PATH" ]; then
+             echo -e "${RED}OpenAI OAuth failed.${NC}"
+             exit 1
+        fi
+    fi
+    
+    # Extract access token
+    OPENAI_ACCESS_TOKEN=$(python3 -c "import json, os; print(json.load(open(os.path.expanduser('$CRED_PATH')))['access_token'])")
+    export OPENAI_API_KEY="$OPENAI_ACCESS_TOKEN"
+}
 
 start_litellm_proxy() {
     local model=$1
@@ -128,13 +153,14 @@ if [ -z "$choice" ]; then
     echo "2) Google Gemini (API Key - AI Studio)"
     echo "3) Google Gemini (OAuth - Vertex AI)"
     echo "4) OpenAI (API Key)"
-    echo "5) xAI / Grok (API Key)"
-    echo "6) ZhipuAI / GLM (API Key)"
-    echo "7) Groq (API Key)"
-    echo "8) Ollama (Local Models)"
-    echo "9) Custom / Other"
+    echo "5) OpenAI (OAuth - Experimental)"
+    echo "6) xAI / Grok (API Key)"
+    echo "7) ZhipuAI / GLM (API Key)"
+    echo "8) Groq (API Key)"
+    echo "9) Ollama (Local Models)"
+    echo "10) Custom / Other"
     echo -e "${GREEN}=====================================${NC}"
-    read -p "Enter choice [1-9]: " choice
+    read -p "Enter choice [1-10]: " choice
 fi
 
 export ANTHROPIC_MODEL="claude-3-sonnet-20240229" # Dummy model name for CLI validation
@@ -161,7 +187,7 @@ case $choice in
             read -p "Enter Gemini API Key: " GEMINI_API_KEY
             export GEMINI_API_KEY
         fi
-        MODEL_NAME="gemini/gemini-1.5-flash" # Use flash by default
+        MODEL_NAME="gemini/gemini-1.5-flash"
         read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
         [ ! -z "$input_model" ] && MODEL_NAME=$input_model
         
@@ -182,7 +208,6 @@ case $choice in
             export VERTEX_PROJECT
         fi
         
-        # Vertex specific env setup for LiteLLM
         export VERTEXAI_PROJECT="$VERTEX_PROJECT"
         export VERTEXAI_LOCATION="us-central1"
         
@@ -196,10 +221,9 @@ case $choice in
         exec claude "$@"
         ;;
     4)
-        # OpenAI
+        # OpenAI API Key
         check_dependencies
         echo -e "${BLUE}Configuring for OpenAI...${NC}"
-        echo -e "${YELLOW}Note: OpenAI does not support OAuth for general CLI API access.${NC}"
         if [ -z "$OPENAI_API_KEY" ]; then
             echo "Get Key: https://platform.openai.com/api-keys"
             read -p "Enter OpenAI API Key: " OPENAI_API_KEY
@@ -215,16 +239,13 @@ case $choice in
         exec claude "$@"
         ;;
     5)
-        # xAI
+        # OpenAI OAuth (Experimental)
         check_dependencies
-        echo -e "${BLUE}Configuring for xAI (Grok)...${NC}"
-        echo -e "${YELLOW}Note: xAI uses API Keys for access.${NC}"
-        if [ -z "$XAI_API_KEY" ]; then
-            echo "Get Key: https://console.x.ai/"
-            read -p "Enter xAI API Key: " XAI_API_KEY
-            export XAI_API_KEY
-        fi
-        MODEL_NAME="xai/grok-1" # Updated to reflect Grok-1
+        echo -e "${BLUE}Configuring for OpenAI (OAuth Experimental)...${NC}"
+        
+        check_openai_oauth
+        
+        MODEL_NAME="gpt-4o"
         read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
         [ ! -z "$input_model" ] && MODEL_NAME=$input_model
         
@@ -234,18 +255,15 @@ case $choice in
         exec claude "$@"
         ;;
     6)
-        # ZhipuAI
+        # xAI
         check_dependencies
-        echo -e "${BLUE}Configuring for ZhipuAI (GLM)...${NC}"
-        echo -e "${YELLOW}Note: ZhipuAI uses API Keys for access.${NC}"
-        if [ -z "$ZHIPUAI_API_KEY" ]; then
-            echo "Get Key: https://open.bigmodel.cn/overview"
-            read -p "Enter ZhipuAI API Key: " ZHIPUAI_API_KEY
-            export ZHIPUAI_API_KEY
+        echo -e "${BLUE}Configuring for xAI (Grok)...${NC}"
+        if [ -z "$XAI_API_KEY" ]; then
+            echo "Get Key: https://console.x.ai/"
+            read -p "Enter xAI API Key: " XAI_API_KEY
+            export XAI_API_KEY
         fi
-        MODEL_NAME="zhipu/glm-4"
-        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
-        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        MODEL_NAME="xai/grok-1"
         
         start_litellm_proxy "$MODEL_NAME"
         export ANTHROPIC_BASE_URL="$LITELLM_HOST"
@@ -253,18 +271,14 @@ case $choice in
         exec claude "$@"
         ;;
     7)
-        # Groq
+        # ZhipuAI
         check_dependencies
-        echo -e "${BLUE}Configuring for Groq...${NC}"
-        echo -e "${YELLOW}Note: Groq uses API Keys for access.${NC}"
-        if [ -z "$GROQ_API_KEY" ]; then
-            echo "Get Key: https://console.groq.com/keys"
-            read -p "Enter Groq API Key: " GROQ_API_KEY
-            export GROQ_API_KEY
+        echo -e "${BLUE}Configuring for ZhipuAI (GLM)...${NC}"
+        if [ -z "$ZHIPUAI_API_KEY" ]; then
+            read -p "Enter ZhipuAI API Key: " ZHIPUAI_API_KEY
+            export ZHIPUAI_API_KEY
         fi
-        MODEL_NAME="groq/llama3-70b-8192"
-        read -p "Enter Model Name [default: $MODEL_NAME]: " input_model
-        [ ! -z "$input_model" ] && MODEL_NAME=$input_model
+        MODEL_NAME="zhipu/glm-4"
         
         start_litellm_proxy "$MODEL_NAME"
         export ANTHROPIC_BASE_URL="$LITELLM_HOST"
@@ -272,12 +286,26 @@ case $choice in
         exec claude "$@"
         ;;
     8)
+        # Groq
+        check_dependencies
+        echo -e "${BLUE}Configuring for Groq...${NC}"
+        if [ -z "$GROQ_API_KEY" ]; then
+            echo "Get Key: https://console.groq.com/keys"
+            read -p "Enter Groq API Key: " GROQ_API_KEY
+            export GROQ_API_KEY
+        fi
+        MODEL_NAME="groq/llama3-70b-8192"
+        
+        start_litellm_proxy "$MODEL_NAME"
+        export ANTHROPIC_BASE_URL="$LITELLM_HOST"
+        export ANTHROPIC_API_KEY="sk-litellm"
+        exec claude "$@"
+        ;;
+    9)
         # Ollama
         check_dependencies
-        echo -e "${BLUE}Configuring for Ollama (Local Models)...${NC}"
-        echo -e "${YELLOW}Ensure Ollama server is running (ollama run <model> &).${NC}"
+        echo -e "${BLUE}Configuring for Ollama...${NC}"
         if [ -z "$OLLAMA_HOST" ]; then
-            echo "Ollama Host (e.g., http://localhost:11434): "
             read -p "Enter Ollama Host [default: http://localhost:11434]: " OLLAMA_HOST
             [ -z "$OLLAMA_HOST" ] && OLLAMA_HOST="http://localhost:11434"
             export OLLAMA_HOST
@@ -291,15 +319,11 @@ case $choice in
         export ANTHROPIC_API_KEY="sk-litellm" # Ollama typically doesn't need an API key
         exec claude "$@"
         ;;
-    9)
+    10)
         # Custom
         check_dependencies
         echo -e "${BLUE}Configuring Custom LiteLLM Model...${NC}"
-        echo "Format example: provider/model-name (e.g., ollama/llama3, azure/gpt-4, cohere/command-r-plus)"
-        echo "For Azure, set AZURE_API_KEY, AZURE_API_BASE, AZURE_API_VERSION env vars."
         read -p "Enter LiteLLM Model String: " MODEL_NAME
-        
-        echo "Set any required env vars (e.g., OLLAMA_HOST, AZURE_API_KEY, OPENROUTER_API_KEY). Press Enter when done."
         read -p "Press Enter to continue..."
 
         start_litellm_proxy "$MODEL_NAME"
